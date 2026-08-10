@@ -14,7 +14,7 @@ export default {
         return decodeURIComponent(escape(atob(base64)));
       }
 
-      // ---------- 登录页面渲染函数（提前定义）----------
+      // ---------- 登录页面渲染函数 ----------
       function renderLoginPage(hasError) {
         const errorBlock = hasError
           ? '<div class="error">密码错误，请重新输入</div>'
@@ -150,7 +150,7 @@ button:hover{
         'Referer': 'https://yun.139.com/',
       };
 
-      // ---------- 辅助工具函数 ----------
+      // ---------- 辅助函数 ----------
       function parseCookies(cookieHeader) {
         const cookies = {};
         if (!cookieHeader) return cookies;
@@ -312,37 +312,64 @@ button:hover{
         return renderLoginPage(false);
       }
 
-      // ---------- 5. 已登录，渲染文件浏览页面 ----------
-      const fid = url.searchParams.get('fid') || rootFid;
-      const breadcrumbParam = url.searchParams.get('breadcrumb');
-      let breadcrumb = [];
-      if (breadcrumbParam) {
-        try {
-          breadcrumb = JSON.parse(atob_utf8(breadcrumbParam));
-        } catch (e) { /* 忽略解析错误 */ }
-      }
+      // ---------- 5. 已登录，渲染文件浏览 ----------
+      const browsePath = url.searchParams.get('browse');
+      let fid, breadcrumb = [];
 
-      // 面包屑逻辑
-      if (fid === rootFid) {
+      if (browsePath) {
+        // === 路径浏览模式 ===
+        const rawPath = decodeURIComponent(browsePath).replace(/^\/+|\/+$/g, '');
+        const pathArr = rawPath.split('/').filter(v => v !== '');
+        if (pathArr.length > 0 && pathArr[0] === 'CMCC') pathArr.shift();
+
+        let currentFid = rootFid;
         breadcrumb = [{ name: '根目录', fid: rootFid }];
+        let foundFid = rootFid;
+
+        for (const folderName of pathArr) {
+          const items = await api_list(currentFid);
+          const found = items.find(item => item.name === folderName && item.type === 'folder');
+          if (!found) {
+            return new Response(`路径不存在：${htmlEscape(folderName)}`, {
+              headers: { 'Content-Type': 'text/html;charset=UTF-8' }
+            });
+          }
+          breadcrumb.push({ name: found.name, fid: found.fileId });
+          currentFid = found.fileId;
+          foundFid = found.fileId;
+        }
+        fid = foundFid;
       } else {
-        if (breadcrumb.length === 0) {
-          breadcrumb = [{ name: '未知文件夹', fid: fid }];
+        // === 原有 fid / breadcrumb 模式 ===
+        fid = url.searchParams.get('fid') || rootFid;
+        const breadcrumbParam = url.searchParams.get('breadcrumb');
+        if (breadcrumbParam) {
+          try {
+            breadcrumb = JSON.parse(atob_utf8(breadcrumbParam));
+          } catch (e) { /* 忽略解析错误 */ }
+        }
+
+        if (fid === rootFid) {
+          breadcrumb = [{ name: '根目录', fid: rootFid }];
         } else {
-          const last = breadcrumb[breadcrumb.length - 1];
-          if (!last || last.fid !== fid) {
-            let folderName = '未知文件夹';
-            const parentFid = breadcrumb.length >= 1 ? breadcrumb[breadcrumb.length - 1].fid : null;
-            if (parentFid) {
-              const items = await api_list(parentFid);
-              for (const item of items) {
-                if (item.fileId === fid && item.type === 'folder') {
-                  folderName = item.name;
-                  break;
+          if (breadcrumb.length === 0) {
+            breadcrumb = [{ name: '未知文件夹', fid: fid }];
+          } else {
+            const last = breadcrumb[breadcrumb.length - 1];
+            if (!last || last.fid !== fid) {
+              let folderName = '未知文件夹';
+              const parentFid = breadcrumb.length >= 1 ? breadcrumb[breadcrumb.length - 1].fid : null;
+              if (parentFid) {
+                const items = await api_list(parentFid);
+                for (const item of items) {
+                  if (item.fileId === fid && item.type === 'folder') {
+                    folderName = item.name;
+                    break;
+                  }
                 }
               }
+              breadcrumb.push({ name: folderName, fid: fid });
             }
-            breadcrumb.push({ name: folderName, fid: fid });
           }
         }
       }
@@ -366,7 +393,7 @@ button:hover{
         bcHtml += `<a href="?fid=${encodeURIComponent(breadcrumb[i].fid)}&breadcrumb=${encodeURIComponent(encoded)}">${htmlEscape(breadcrumb[i].name)}</a>`;
       }
 
-      // 文件列表行
+      // 文件列表
       let rowsHtml = '';
       if (items.length === 0) {
         rowsHtml = '<tr><td colspan="3">目录无内容 / Authorization 或 mcloud-sign 可能过期，请重新抓包替换头部</td></tr>';
