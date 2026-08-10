@@ -96,7 +96,7 @@ button:hover{
 </head>
 <body>
 <div class="login-card">
-  <h2>🔐 访问验证</h2>
+  <h2>CMCC files 云盘</h2>
   <div class="login-desc">请输入页面访问密码进入云盘浏览</div>
   ${errorBlock}
   <form method="post">
