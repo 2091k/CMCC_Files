@@ -135,7 +135,13 @@ function getDownloadUrl(string $fileId, array $headers): array
 
 // ==========【下载逻辑完全不做密码校验】只要参数正确直接下载 ==========
 if (!empty($_GET['path'])) {
-    $pathRaw = urldecode(trim($_GET['path'], '/'));
+    $pathRawInput = urldecode(trim($_GET['path'], '/'));
+    // 关键修复：剥离path内部文件名后面附带的 ?sign=xxx:0 这类查询串，只取 ? 前面真实路径
+    if(strpos($pathRawInput,'?') !== false){
+        $pathRaw = explode('?',$pathRawInput,2)[0];
+    }else{
+        $pathRaw = $pathRawInput;
+    }
     $pathArr = array_filter(explode('/', $pathRaw), fn($v)=>$v!=='');
     $pathArr = array_values($pathArr);
     // 去掉虚拟CMCC第一层，不传给网盘API
