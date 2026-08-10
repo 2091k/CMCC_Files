@@ -24,7 +24,7 @@ export default {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>139云盘 - 访问密码</title>
+<title>CMCC云盘 - 访问密码</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{
@@ -427,7 +427,7 @@ button:hover{
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>139云盘文件浏览下载</title>
+<title>CMCC云盘文件浏览下载</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
 body{max-width:1240px;margin:30px auto;padding:0 16px}
@@ -457,7 +457,7 @@ a:hover{text-decoration:underline}
 </head>
 <body>
 <div class="header-wrap">
-  <h1>📂 139云盘文件浏览</h1>
+  <h1>📂 CMCC云盘文件浏览</h1>
   <a class="logout-btn" href="?logout=1">🚪 退出登录</a>
 </div>
 ${backBtnHtml}
