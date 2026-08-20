@@ -8,3 +8,4 @@ Cloudflare workers
 | 纯文本 | AUTH | token 【Basic cGM6***】 |
 | 纯文本 | ROOT_ID | 文件夹ID |
 | 纯文本 | PAGE_PASSWORD | 密码 |
+| xxxx | KV空间名称 | CMCC_KV |
