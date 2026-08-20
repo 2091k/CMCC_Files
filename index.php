@@ -1,14 +1,14 @@
 <?php
 session_start();
 // =========配置区========
-$defaultAuth = "token";
+$defaultAuth = "TOKEN";
 $defaultRootId = "文件夹ID";
 $DEBUG = false;
-// 网页浏览页面登录密码（自行修改）
-define('PAGE_PASSWORD', '123456');
+define('PAGE_PASSWORD', '123456@');
+define('SHARE_FILE', __DIR__.'/share_data.json');
 // =======================
 
-// 退出登录处理
+// 退出登录（非分享模式使用）
 if(isset($_GET['logout'])){
     unset($_SESSION['page_login']);
     session_destroy();
@@ -18,6 +18,66 @@ if(isset($_GET['logout'])){
 
 $auth = $_GET['auth'] ?? $defaultAuth;
 $rootFid = $defaultRootId;
+
+// ---------- 分享数据读写 ----------
+function loadShares() {
+    if (file_exists(SHARE_FILE)) {
+        $data = json_decode(file_get_contents(SHARE_FILE), true);
+        return is_array($data) ? $data : [];
+    }
+    return [];
+}
+function saveShares($shares) {
+    file_put_contents(SHARE_FILE, json_encode($shares, JSON_PRETTY_PRINT));
+}
+
+// ---------- 处理分享/取消分享 ----------
+if (isset($_GET['action']) && in_array($_GET['action'], ['share','unshare']) && isset($_GET['fid'])) {
+    $action = $_GET['action'];
+    $fid = $_GET['fid'];
+    $shares = loadShares();
+    if ($action === 'share') {
+        foreach ($shares as $token => $fid_existing) {
+            if ($fid_existing === $fid) {
+                unset($shares[$token]);
+                break;
+            }
+        }
+        $token = bin2hex(random_bytes(16));
+        $shares[$token] = $fid;
+        saveShares($shares);
+        $shareLink = (isset($_SERVER['HTTPS']) ? 'https' : 'http') . '://' . $_SERVER['HTTP_HOST'] . $_SERVER['SCRIPT_NAME'] . '?share_token=' . $token;
+        header("Location: ?share_success=1&share_link=" . urlencode($shareLink));
+        exit;
+    } elseif ($action === 'unshare') {
+        foreach ($shares as $token => $fid_existing) {
+            if ($fid_existing === $fid) {
+                unset($shares[$token]);
+                saveShares($shares);
+                break;
+            }
+        }
+        header("Location: ?unshare_success=1");
+        exit;
+    }
+}
+
+// ---------- 分享模式检测 ----------
+$shareToken = $_GET['share_token'] ?? '';
+$shareFid = null;
+$isShareMode = false;
+if ($shareToken) {
+    $shares = loadShares();
+    if (isset($shares[$shareToken])) {
+        $shareFid = $shares[$shareToken];
+        $isShareMode = true;
+        $rootFid = $shareFid;
+        // 不设置登录会话，保持未登录状态
+    } else {
+        die("无效的分享链接");
+    }
+}
+define('SHARE_MODE', $isShareMode);
 
 $commonHeaders = [
     'User-Agent: Mozilla/5.0 (Linux; U; Android 10; zh-CN; 2014811 Build/QQ3A.200805.001) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/78.0.2564.116 Quark/3.8.2.126 Mobile Safari/537.36 T7/10.3 SearchCraft/2.6.3 (Baidu; P1 8.0.0)',
@@ -57,10 +117,6 @@ $commonHeaders = [
     'Referer: https://yun.139.com/',
 ];
 
-
-/**
- * 获取目录文件列表
- */
 function api_list(string $parentId, array $headers): array
 {
     $curl = curl_init();
@@ -86,9 +142,6 @@ function api_list(string $parentId, array $headers): array
     return $json['data']['items'] ?? [];
 }
 
-/**
- * 递归按名称逐层查找文件ID
- */
 function findFileByPath(string $startFid, array $pathArr, array $headers): ?string
 {
     if (empty($pathArr)) return null;
@@ -106,9 +159,6 @@ function findFileByPath(string $startFid, array $pathArr, array $headers): ?stri
     return null;
 }
 
-/**
- * 获取CDN下载直链
- */
 function getDownloadUrl(string $fileId, array $headers): array
 {
     $curl = curl_init();
@@ -133,10 +183,10 @@ function getDownloadUrl(string $fileId, array $headers): array
     ];
 }
 
-// ==========【下载逻辑完全不做密码校验】只要参数正确直接下载 ==========
-if (!empty($_GET['path'])) {
+// ========== 下载逻辑 ==========
+// 1. 路径下载（非分享模式可用）
+if (!empty($_GET['path']) && !SHARE_MODE) {
     $pathRawInput = urldecode(trim($_GET['path'], '/'));
-    // 关键修复：剥离path内部文件名后面附带的 ?sign=xxx:0 这类查询串，只取 ? 前面真实路径
     if(strpos($pathRawInput,'?') !== false){
         $pathRaw = explode('?',$pathRawInput,2)[0];
     }else{
@@ -144,11 +194,10 @@ if (!empty($_GET['path'])) {
     }
     $pathArr = array_filter(explode('/', $pathRaw), fn($v)=>$v!=='');
     $pathArr = array_values($pathArr);
-    // 去掉虚拟CMCC第一层，不传给网盘API
     if(!empty($pathArr) && $pathArr[0]==='CMCC'){
         array_shift($pathArr);
     }
-    $startFid = !empty($_GET['fid']) ? $_GET['fid'] : $rootFid;
+    $startFid = (!empty($_GET['fid'])) ? $_GET['fid'] : $rootFid;
     $targetFid = findFileByPath($startFid, $pathArr, $commonHeaders);
     if ($targetFid === null) die("路径不存在，请核对名称：".htmlspecialchars($pathRaw));
     $dlRes = getDownloadUrl($targetFid, $commonHeaders);
@@ -161,8 +210,24 @@ if (!empty($_GET['path'])) {
     exit;
 }
 
+// 2. 文件ID下载（非分享模式直接可用；分享模式需验证）
 if(!empty($_GET['download_fid'])){
     $fid = $_GET['download_fid'];
+    if (SHARE_MODE) {
+        // 分享模式：验证该文件是否属于当前目录
+        $currentFid = $_GET['fid'] ?? $rootFid; // 当前目录ID
+        $items = api_list($currentFid, $commonHeaders);
+        $found = false;
+        foreach ($items as $item) {
+            if ($item['fileId'] === $fid && $item['type'] !== 'folder') {
+                $found = true;
+                break;
+            }
+        }
+        if (!$found) {
+            die("文件不存在或无权下载");
+        }
+    }
     $dlRes = getDownloadUrl($fid, $commonHeaders);
     $dlUrl = $dlRes['url'];
     if($dlUrl === ""){
@@ -173,23 +238,22 @@ if(!empty($_GET['download_fid'])){
     exit;
 }
 
-// ====================== 网页浏览页面：密码登录校验开始 ======================
-$isLogin = isset($_SESSION['page_login']) && $_SESSION['page_login'] === true;
+// ========== 密码验证（分享模式自动跳过）==========
+$isLogin = false;
 $passwordError = '';
-
-// 提交密码登录
-if(isset($_POST['submit_password'])){
-    if($_POST['password'] === PAGE_PASSWORD){
-        $_SESSION['page_login'] = true;
-        $isLogin = true;
-    }else{
-        $passwordError = "密码错误，请重新输入";
+if (!SHARE_MODE) {
+    $isLogin = isset($_SESSION['page_login']) && $_SESSION['page_login'] === true;
+    if(isset($_POST['submit_password'])){
+        if($_POST['password'] === PAGE_PASSWORD){
+            $_SESSION['page_login'] = true;
+            $isLogin = true;
+        }else{
+            $passwordError = "密码错误，请重新输入";
+        }
     }
-}
-
-// 未登录输出密码表单，终止程序，不渲染文件列表
-if(!$isLogin){
-?>
+    if(!$isLogin){
+        // 显示密码表单（省略，同之前）
+        ?>
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -281,39 +345,58 @@ button:hover{
 </html>
 <?php
 exit;
+    }
+} else {
+    // 分享模式：视为已登录（仅用于渲染列表）
+    $isLogin = true;
 }
-// ====================== 登录成功，继续渲染文件列表页面 ======================
 
-// --------面包屑导航处理 --------
-$breadcrumb = [];
-$parentFileId = $_GET['fid'] ?? $rootFid;
-if(!empty($_GET['breadcrumb'])){
-    $rawBc = json_decode(base64_decode($_GET['breadcrumb']),true);
-    if(is_array($rawBc)) $breadcrumb = $rawBc;
+// ====================== 构建面包屑 ======================
+$rootId = SHARE_MODE ? $shareFid : $defaultRootId;
+$rootName = SHARE_MODE ? "分享根目录" : "CMCC";
+
+if (SHARE_MODE) {
+    $parentFileId = $rootId; // 强制从根开始
+} else {
+    $parentFileId = (!empty($_GET['fid'])) ? $_GET['fid'] : $rootId;
 }
-if($parentFileId === $rootFid){
-    $breadcrumb = [ ["name"=>"根目录","fid"=>$rootFid] ];
-}else{
+
+$breadcrumb = [];
+if (!empty($_GET['breadcrumb'])) {
+    $rawBc = json_decode(base64_decode($_GET['breadcrumb']), true);
+    if (is_array($rawBc)) $breadcrumb = $rawBc;
+}
+if (empty($breadcrumb) || $breadcrumb[0]['fid'] !== $rootId) {
+    array_unshift($breadcrumb, ["name"=>$rootName, "fid"=>$rootId]);
+}
+
+if ($parentFileId !== $rootId) {
     $last = end($breadcrumb);
-    if(!$last || $last['fid'] !== $parentFileId){
-        $folderName = "未知文件夹";
-        $parentOfCurrent = count($breadcrumb)>=1 ? $breadcrumb[count($breadcrumb)-1]['fid'] : null;
-        if($parentOfCurrent){
-            $list = api_list($parentOfCurrent,$commonHeaders);
-            foreach ($list as $li){
-                if($li['fileId'] === $parentFileId && $li['type']==='folder'){
+    if (!$last || $last['fid'] !== $parentFileId) {
+        $folderName = $_GET['folder_name'] ?? null;
+        if ($folderName === null) {
+            $folderName = "未知文件夹";
+            $parentFid = (count($breadcrumb) >= 2) ? $breadcrumb[count($breadcrumb)-2]['fid'] : $rootId;
+            $list = api_list($parentFid, $commonHeaders);
+            foreach ($list as $li) {
+                if ($li['fileId'] === $parentFileId && $li['type'] === 'folder') {
                     $folderName = $li['name'];
                     break;
                 }
             }
         }
-        $breadcrumb[] = ["name"=>$folderName,"fid"=>$parentFileId];
+        $breadcrumb[] = ["name"=>$folderName, "fid"=>$parentFileId];
     }
+} else {
+    $breadcrumb = [ ["name"=>$rootName, "fid"=>$rootId] ];
 }
-$bcEncoded = base64_encode(json_encode($breadcrumb,JSON_UNESCAPED_UNICODE));
+
+$bcEncoded = base64_encode(json_encode($breadcrumb, JSON_UNESCAPED_UNICODE));
+
+// 获取文件列表
 $respItems = api_list($parentFileId, $commonHeaders);
 
-// 字节格式化
+// 格式化大小
 function formatSize(?int $bytes): string
 {
     if($bytes === null) return "-";
@@ -323,20 +406,36 @@ function formatSize(?int $bytes): string
     return round($bytes/1073741824,2)." GB";
 }
 
-/**
- * 生成路径下载链接，最前面固定带上 CMCC
- */
+// 生成路径下载链接（仅非分享模式使用）
 function getParamUrl($breadcrumbArr, $fileName): string
 {
-    $realPathArr = array_slice($breadcrumbArr,1);
-    $nameParts = [];
-    $nameParts[] = "CMCC";
-    foreach ($realPathArr as $item){
+    $realPathArr = array_slice($breadcrumbArr, 1);
+    $nameParts = ["CMCC"];
+    foreach ($realPathArr as $item) {
         $nameParts[] = $item['name'];
     }
     $nameParts[] = $fileName;
-    $pathStr = implode('/',$nameParts);
-    return 'index.php?path='.rawurlencode($pathStr);
+    $pathStr = implode('/', $nameParts);
+    return 'index.php?path=' . rawurlencode($pathStr);
+}
+
+// 检查当前文件夹是否已分享（仅非分享模式需要）
+$shares = loadShares();
+$isShared = false;
+foreach ($shares as $token => $fid) {
+    if ($fid === $parentFileId) {
+        $isShared = true;
+        break;
+    }
+}
+
+// 消息提示
+$shareSuccessMsg = '';
+if (isset($_GET['share_success']) && isset($_GET['share_link'])) {
+    $shareSuccessMsg = '分享链接已生成：<a href="'.htmlspecialchars($_GET['share_link']).'" target="_blank">'.htmlspecialchars($_GET['share_link']).'</a>（永久有效）';
+}
+if (isset($_GET['unshare_success'])) {
+    $shareSuccessMsg = '已取消分享。';
 }
 ?>
 <!DOCTYPE html>
@@ -344,7 +443,7 @@ function getParamUrl($breadcrumbArr, $fileName): string
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>139云盘文件浏览下载</title>
+<title><?=SHARE_MODE?'分享文件夹 - 139云盘':'139云盘文件浏览下载'?></title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
 body{max-width:1240px;margin:30px auto;padding:0 16px}
@@ -374,6 +473,27 @@ a:hover{text-decoration:underline}
 .size{color:#6b7280;font-size:13px}
 .back-btn{display:inline-block;padding:7px 14px;background:#e5e7eb;border-radius:6px;margin-bottom:12px;color:#1f2937;text-decoration:none;font-size:14px}
 .back-btn:hover{background:#dde0e4}
+.share-btn, .unshare-btn {
+    display:inline-block;
+    padding:4px 12px;
+    border-radius:4px;
+    font-size:13px;
+    text-decoration:none;
+    color:#fff;
+    background:#10b981;
+}
+.unshare-btn{background:#ef4444;}
+.share-btn:hover{background:#059669;}
+.unshare-btn:hover{background:#dc2626;}
+.msg-box {
+    background:#d1fae5;
+    border:1px solid #a7f3d0;
+    padding:12px 16px;
+    border-radius:6px;
+    margin-bottom:16px;
+    color:#065f46;
+}
+.msg-box a{color:#065f46;text-decoration:underline;}
 @media(max-width:720px){
     table th:nth-child(2),table td:nth-child(2){display:none;}
     th,td{padding:10px 8px;font-size:14px}
@@ -382,40 +502,34 @@ a:hover{text-decoration:underline}
 </head>
 <body>
 <div class="header-wrap">
-    <h1>📂 139云盘文件浏览</h1>
-    <a class="logout-btn" href="?logout=1">🚪 退出登录</a>
+    <h1><?=SHARE_MODE?'📂 分享文件夹内容':'📂 139云盘文件浏览'?></h1>
+    <?php if(!SHARE_MODE): ?>
+        <a class="logout-btn" href="?logout=1">🚪 退出登录</a>
+    <?php endif; ?>
 </div>
 
-<?php /*
-<div class="info">
-<h3>访问说明（虚拟顶层CMCC）</h3>
-1.路径下载完整示例：index.php?path=CMCC/电脑/app/TSC/BarTend/企业版/官方版本/BT2022_R6_206587_Full_x64.exe<br>
-2.参数下载：?fid=目录ID&path=文件名<br>
-3.ID下载（稳定推荐）：?fid=目录ID&download_fid=文件ID<br>
-4.目录浏览：?fid=文件夹ID
-</div>
-*/ ?>
+<?php if(!empty($shareSuccessMsg)): ?>
+    <div class="msg-box"><?=$shareSuccessMsg?></div>
+<?php endif; ?>
 
 <?php
 // 返回上一级按钮
-if($parentFileId !== $rootFid && count($breadcrumb)>=2){
+if (count($breadcrumb) >= 2 && $parentFileId !== $rootId) {
     $prevItem = $breadcrumb[count($breadcrumb)-2];
-    $prevBc = base64_encode(json_encode(array_slice($breadcrumb,0,-1),JSON_UNESCAPED_UNICODE));
+    $prevBc = base64_encode(json_encode(array_slice($breadcrumb, 0, -1), JSON_UNESCAPED_UNICODE));
 ?>
-<a class="back-btn" href="?fid=<?=urlencode($prevItem['fid'])?>&breadcrumb=<?=urlencode($prevBc)?>">← 返回上一级</a>
+<a class="back-btn" href="?fid=<?=urlencode($prevItem['fid'])?>&breadcrumb=<?=urlencode($prevBc)?>&folder_name=<?=urlencode($prevItem['name'])?>">← 返回上一级</a>
 <?php } ?>
 
 <div class="breadcrumb">
 📂 当前路径：
-<a href="?fid=<?=urlencode($rootFid)?>">CMCC</a>
-<span class="sep">/</span>
-<?php foreach ($breadcrumb as $idx=>$bcItem): ?>
-<?php if($idx>0):?><span class="sep">/</span><?php endif; ?>
-<?php
-$sliceBc = array_slice($breadcrumb,0,$idx+1);
-$sliceEncode = base64_encode(json_encode($sliceBc,JSON_UNESCAPED_UNICODE));
-?>
-<a href="?fid=<?=urlencode($bcItem['fid'])?>&breadcrumb=<?=urlencode($sliceEncode)?>"><?=htmlspecialchars($bcItem['name'])?></a>
+<?php foreach ($breadcrumb as $idx => $bcItem): ?>
+    <?php if($idx>0):?><span class="sep">/</span><?php endif; ?>
+    <?php
+    $sliceBc = array_slice($breadcrumb, 0, $idx+1);
+    $sliceEncode = base64_encode(json_encode($sliceBc, JSON_UNESCAPED_UNICODE));
+    ?>
+    <a href="?fid=<?=urlencode($bcItem['fid'])?>&breadcrumb=<?=urlencode($sliceEncode)?>&folder_name=<?=urlencode($bcItem['name'])?>"><?=htmlspecialchars($bcItem['name'])?></a>
 <?php endforeach; ?>
 </div>
 
@@ -431,17 +545,40 @@ $sliceEncode = base64_encode(json_encode($sliceBc,JSON_UNESCAPED_UNICODE));
     <tr>
     <?php if($item['type'] === 'folder'): ?>
         <td class="folder">
-            <a href="?fid=<?=urlencode($item['fileId'])?>&breadcrumb=<?=urlencode($bcEncoded)?>">📁 <?=htmlspecialchars($item['name'])?></a>
+            <a href="?fid=<?=urlencode($item['fileId'])?>&breadcrumb=<?=urlencode($bcEncoded)?>&folder_name=<?=urlencode($item['name'])?>">📁 <?=htmlspecialchars($item['name'])?></a>
         </td>
         <td class="size">-</td>
-        <td>-</td>
+        <td>
+            <?php if(!SHARE_MODE): ?>
+                <?php
+                $sharedNow = false;
+                foreach ($shares as $token => $fid) {
+                    if ($fid === $item['fileId']) {
+                        $sharedNow = true;
+                        break;
+                    }
+                }
+                if ($sharedNow): ?>
+                    <a class="unshare-btn" href="?action=unshare&fid=<?=urlencode($item['fileId'])?>">取消分享</a>
+                <?php else: ?>
+                    <a class="share-btn" href="?action=share&fid=<?=urlencode($item['fileId'])?>">分享</a>
+                <?php endif; ?>
+            <?php else: ?>
+                <span style="color:#9ca3af;">只读</span>
+            <?php endif; ?>
+        </td>
     <?php else: ?>
         <td class="file"><?=htmlspecialchars($item['name'])?></td>
         <td class="size"><?=formatSize($item['size'])?></td>
         <td>
-            <a href="?fid=<?=urlencode($parentFileId)?>&download_fid=<?=urlencode($item['fileId'])?>">ID下载</a>｜
-            <a href="?fid=<?=urlencode($parentFileId)?>&path=<?=urlencode($item['name'])?>">参数下载</a>｜
-            <a href="<?=htmlspecialchars(getParamUrl($breadcrumb, $item['name']))?>">路径下载</a>
+            <?php if(SHARE_MODE): ?>
+                <!-- 分享模式：使用ID下载，并携带当前目录fid用于验证 -->
+                <a href="?download_fid=<?=urlencode($item['fileId'])?>&fid=<?=urlencode($parentFileId)?>">下载</a>
+            <?php else: ?>
+                <a href="?fid=<?=urlencode($parentFileId)?>&download_fid=<?=urlencode($item['fileId'])?>">ID下载</a>｜
+                <a href="?fid=<?=urlencode($parentFileId)?>&path=<?=urlencode($item['name'])?>">参数下载</a>｜
+                <a href="<?=htmlspecialchars(getParamUrl($breadcrumb, $item['name']))?>">路径下载</a>
+            <?php endif; ?>
         </td>
     <?php endif; ?>
     </tr>
