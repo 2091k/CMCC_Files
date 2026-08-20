@@ -264,15 +264,26 @@ button:hover{
           return Response.redirect(dl.url, 302);
         }
         if (url.searchParams.has('path')) {
-          const pathRaw = decodeURIComponent(url.searchParams.get('path')).replace(/\/+$/, '');
-          const pathArr = pathRaw.split('/').filter(v => v !== '');
+          // ==========修复：手动解析原始query字符串，截断后面?sign=xxx &xxx 多余参数==========
+          let rawQuery = url.search.slice(1);
+          let realPathStr = '';
+          // 匹配 path=xxx 部分
+          const pathMatch = rawQuery.match(/path=([^&]*)/);
+          if(pathMatch){
+            realPathStr = decodeURIComponent(pathMatch[1]);
+          }
+          // 把路径内部如果意外带入的 ? # & 全部截断，只保留真实文件路径
+          realPathStr = realPathStr.split(/[?#&]/)[0];
+          realPathStr = realPathStr.replace(/\/+$/, '');
+
+          const pathArr = realPathStr.split('/').filter(v => v !== '');
           if (pathArr.length > 0 && pathArr[0] === 'CMCC') {
             pathArr.shift();
           }
           const startFid = url.searchParams.get('fid') || rootFid;
           const targetFid = await findFileByPath(startFid, [...pathArr]);
           if (!targetFid) {
-            return new Response(`路径不存在，请核对名称：${htmlEscape(pathRaw)}`, {
+            return new Response(`路径不存在，请核对名称：${htmlEscape(realPathStr)}`, {
               headers: { 'Content-Type': 'text/html;charset=UTF-8' }
             });
           }
