@@ -231,14 +231,26 @@ button:hover{
       }
 
       // ---------- 分享功能：读写 KV ----------
+      // KV 值格式：新记录为 JSON 字符串 {fid, name, ts}；兼容旧格式（纯 fid 字符串）
+      function parseShareRecord(val) {
+        if (!val) return null;
+        try {
+          const o = JSON.parse(val);
+          if (o && typeof o === 'object' && o.fid) {
+            return { fid: String(o.fid), name: o.name || '已分享文件夹', ts: o.ts || 0 };
+          }
+        } catch (e) { /* 旧格式：纯 fid 字符串 */ }
+        return { fid: String(val), name: '已分享文件夹', ts: 0 };
+      }
+
       async function getShareFid(token) {
         if (!kv) return null;
-        const val = await kv.get(token);
-        return val || null;
+        const rec = parseShareRecord(await kv.get(token));
+        return rec ? rec.fid : null;
       }
-      async function setShare(token, fid) {
+      async function setShare(token, recordJson) {
         if (!kv) return;
-        await kv.put(token, fid);
+        await kv.put(token, recordJson);
       }
       async function deleteShare(token) {
         if (!kv) return;
@@ -282,7 +294,8 @@ button:hover{
           }
           if (action === 'share') {
             const token = crypto.randomUUID().replace(/-/g, '');
-            await setShare(token, fidParam);
+            const name = (url.searchParams.get('name') || '').trim() || '未命名文件夹';
+            await setShare(token, JSON.stringify({ fid: fidParam, name: name, ts: Date.now() }));
             const shareLink = `${url.protocol}//${url.host}?share_token=${token}`;
             return new Response(JSON.stringify({ success: true, share_link: shareLink }), {
               headers: { 'Content-Type': 'application/json' }
@@ -291,8 +304,8 @@ button:hover{
             const list = await kv.list();
             let foundToken = null;
             for (const key of list.keys) {
-              const val = await kv.get(key.name);
-              if (val === fidParam) {
+              const rec = parseShareRecord(await kv.get(key.name));
+              if (rec && rec.fid === fidParam) {
                 foundToken = key.name;
                 break;
               }
@@ -413,7 +426,8 @@ button:hover{
             status: 302,
             headers: {
               'Location': '/admin',
-              'Set-Cookie': 'page_login=1; Path=/; HttpOnly; SameSite=Lax'
+              // Max-Age 使登录态持久存在浏览器里：关闭浏览器后再次访问 /admin 无需重新登录
+              'Set-Cookie': 'page_login=1; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax'
             }
           });
         } else {
@@ -472,6 +486,18 @@ button:hover{
 
       const items = await api_list(currentFid);
 
+      // ---------- 读取全部分享记录（非分享模式，供行内分享状态与"已分享链接"区共用）----------
+      let shareRecords = [];
+      if (!isShareMode) {
+        try {
+          const list = await kv.list();
+          for (const key of list.keys) {
+            const rec = parseShareRecord(await kv.get(key.name));
+            if (rec) shareRecords.push({ token: key.name, ...rec });
+          }
+        } catch (e) { /* KV 不可用时忽略 */ }
+      }
+
       // ---------- 链接构建辅助 ----------
       // 基础 URL（分享模式带 share_token，非分享模式为 /admin）
       const baseHref = isShareMode
@@ -508,24 +534,14 @@ button:hover{
         for (const item of items) {
           if (item.type === 'folder') {
             // 检查是否已分享（仅非分享模式）
-            let isShared = false;
-            if (!isShareMode && isLogin) {
-              const list = await kv.list();
-              for (const key of list.keys) {
-                const val = await kv.get(key.name);
-                if (val === item.fileId) {
-                  isShared = true;
-                  break;
-                }
-              }
-            }
+            const isShared = !isShareMode && shareRecords.some(r => r.fid === item.fileId);
             let shareBtnHtml;
             if (isShareMode) {
               shareBtnHtml = '<span style="color:#9ca3af;">只读</span>';
             } else {
               shareBtnHtml = isShared
                 ? `<button class="unshare-btn" data-fid="${item.fileId}" onclick="unshareFolder(this)">取消分享</button>`
-                : `<button class="share-btn" data-fid="${item.fileId}" onclick="shareFolder(this)">分享</button>`;
+                : `<button class="share-btn" data-fid="${item.fileId}" data-name="${htmlEscape(item.name)}" onclick="shareFolder(this)">分享</button>`;
             }
 
             const newBc = [...breadcrumb, { name: item.name, fid: item.fileId }];
@@ -582,6 +598,36 @@ button:hover{
         backBtnHtml = `<a class="back-btn" href="${href}">← 返回上一级</a>`;
       }
 
+      // ---------- 已分享弹窗内容（点头部"已分享"按钮查看，方便以后复制）----------
+      let sharesModalHtml = '';
+      if (!isShareMode) {
+        const modalShell = (inner) => `<div id="sharesModal" class="modal">
+          <div class="modal-content modal-content-scroll">
+            <span class="close-btn" onclick="document.getElementById('sharesModal').style.display='none'">&times;</span>
+            ${inner}
+          </div>
+        </div>`;
+        if (shareRecords.length > 0) {
+          const shareItems = shareRecords.map(rec => {
+            const shareLink = `${url.protocol}//${url.host}?share_token=${rec.token}`;
+            return `<div class="share-item">
+              <div class="share-item-name">📁 ${htmlEscape(rec.name)}</div>
+              <div class="link-box">${htmlEscape(shareLink)}</div>
+              <div>
+                <button class="copy-btn-sm" data-link="${htmlEscape(shareLink)}" onclick="copyListLink(this)">📋 复制链接</button>
+                <button class="unshare-btn" data-fid="${htmlEscape(rec.fid)}" onclick="unshareFolder(this)">取消分享</button>
+              </div>
+            </div>`;
+          }).join('');
+          sharesModalHtml = modalShell(`<h3>🔗 已分享链接（永久有效）</h3>
+            <p style="color:#6b7280;font-size:14px;margin-bottom:14px;">点击复制，方便以后查看</p>
+            ${shareItems}`);
+        } else {
+          sharesModalHtml = modalShell(`<h3>🔗 已分享链接</h3>
+            <p style="color:#6b7280;font-size:14px;">暂无分享，点击文件夹旁的"分享"按钮生成链接</p>`);
+        }
+      }
+
       // ---------- 页面 HTML ----------
       const pageHtml = `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -622,6 +668,16 @@ a:hover{text-decoration:underline}
 .unshare-btn{background:#ef4444;}
 .share-btn:hover{background:#059669;}
 .unshare-btn:hover{background:#dc2626;}
+/* 已分享按钮与弹窗 */
+.header-actions{display:flex;align-items:center;gap:8px}
+.shares-btn{padding:7px 14px;background:#4f46e5;color:#fff;border:none;border-radius:6px;font-size:14px;cursor:pointer}
+.shares-btn:hover{background:#4338ca}
+.copy-btn-sm{padding:4px 10px;border-radius:4px;font-size:13px;border:none;color:#fff;background:#4f46e5;cursor:pointer;margin-right:6px}
+.copy-btn-sm:hover{background:#4338ca}
+.share-item{border:1px solid #e5e7eb;border-radius:8px;padding:12px 14px;margin-bottom:12px;text-align:left;background:#fafafa}
+.share-item-name{font-weight:bold;color:#1f2937;margin-bottom:8px}
+.share-item .link-box{margin:0 0 10px}
+.modal-content-scroll{max-height:80vh;overflow-y:auto}
 /* 模态框 */
 .modal {
   display: none;
@@ -687,7 +743,10 @@ a:hover{text-decoration:underline}
 <body>
 <div class="header-wrap">
   <h1>${isShareMode ? '📂 分享文件夹内容' : '📂 CMCC云盘文件浏览'}</h1>
-  ${!isShareMode ? `<a class="logout-btn" href="/admin?logout=1">🚪 退出登录</a>` : ''}
+  ${!isShareMode ? `<div class="header-actions">
+    <button class="shares-btn" onclick="openSharesModal()">🔗 已分享</button>
+    <a class="logout-btn" href="/admin?logout=1">🚪 退出登录</a>
+  </div>` : ''}
 </div>
 ${backBtnHtml}
 <div class="breadcrumb">📂 当前路径：${bcHtml}</div>
@@ -707,12 +766,16 @@ ${backBtnHtml}
   </div>
 </div>
 
+<!-- 已分享弹窗 -->
+${sharesModalHtml}
+
 <script>
 // 分享功能
 async function shareFolder(btn) {
   const fid = btn.dataset.fid;
+  const name = btn.dataset.name || '未命名文件夹';
   try {
-    const resp = await fetch('/admin?action=share&fid=' + encodeURIComponent(fid));
+    const resp = await fetch('/admin?action=share&fid=' + encodeURIComponent(fid) + '&name=' + encodeURIComponent(name));
     const data = await resp.json();
     if (data.success) {
       document.getElementById('shareLinkDisplay').textContent = data.share_link;
@@ -743,16 +806,23 @@ async function unshareFolder(btn) {
 }
 
 function copyShareLink() {
-  const link = window._shareLink;
-  if (!link) return;
+  copyText(window._shareLink);
+}
+
+function copyListLink(btn) {
+  copyText(btn.dataset.link);
+}
+
+function copyText(text) {
+  if (!text) return;
   if (navigator.clipboard) {
-    navigator.clipboard.writeText(link).then(() => {
+    navigator.clipboard.writeText(text).then(() => {
       alert('链接已复制到剪贴板');
     }).catch(() => {
-      fallbackCopy(link);
+      fallbackCopy(text);
     });
   } else {
-    fallbackCopy(link);
+    fallbackCopy(text);
   }
 }
 
@@ -766,10 +836,19 @@ function fallbackCopy(text) {
   alert('链接已复制到剪贴板');
 }
 
+function openSharesModal() {
+  const m = document.getElementById('sharesModal');
+  if (m) m.style.display = 'flex';
+}
+
 window.onclick = function(event) {
   const modal = document.getElementById('shareModal');
   if (event.target === modal) {
     modal.style.display = 'none';
+  }
+  const sm = document.getElementById('sharesModal');
+  if (event.target === sm) {
+    sm.style.display = 'none';
   }
 }
 </script>
